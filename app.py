@@ -103,9 +103,22 @@ def role_required(roles):
         return decorated_function
     return decorator
 
+def letterbox(im, new_shape=640, color=(114, 114, 114)):
+    """Redimensiona manteniendo aspecto y rellena a cuadrado 640x640."""
+    h, w = im.shape[:2]
+    r = min(new_shape / h, new_shape / w)
+    nh, nw = int(round(h * r)), int(round(w * r))
+    resized = cv2.resize(im, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((new_shape, new_shape, 3), color, dtype=np.uint8)
+    top = (new_shape - nh) // 2
+    left = (new_shape - nw) // 2
+    canvas[top:top + nh, left:left + nw] = resized
+    return canvas, r, left, top
+
+
 def detect_people(image_bytes):
-    """Detecta personas humanas reales (YOLOv5 ONNX).
-    Confianza correcta = objectness * class_score.
+    """Detecta personas con YOLOv5n ONNX.
+    Coordenadas del modelo están en espacio 640x640 (NO normalizadas 0-1).
     Retorna (count, centers, boxes, annotated_jpeg_bytes)
     boxes = [[x, y, w, h, conf], ...]
     """
@@ -113,37 +126,30 @@ def detect_people(image_bytes):
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
         return 0, [], [], None
-    (h, w) = img.shape[:2]
-    blob = cv2.dnn.blobFromImage(img, 1/255.0, (640, 640), swapRB=True, crop=False)
+
+    h, w = img.shape[:2]
+    lb_img, ratio, pad_x, pad_y = letterbox(img, 640)
+    blob = cv2.dnn.blobFromImage(lb_img, 1 / 255.0, (640, 640), swapRB=True, crop=False)
     net = get_net()
     net.setInput(blob)
     outputs = net.forward()
 
-    # Soportar salida [1, N, 85] o [1, 85, N]
     out = outputs[0]
     if len(out.shape) == 2 and out.shape[0] == 85:
-        out = out.T  # -> [N, 85]
-    elif len(out.shape) == 2 and out.shape[1] != 85 and out.shape[0] != 85:
-        # intentar aplanar
-        out = out.reshape(-1, out.shape[-1])
+        out = out.T
+
+    CONF_THRESHOLD = 0.15
+    NMS_THRESHOLD = 0.50
 
     boxes = []
     confidences = []
     centers = []
 
-    CONF_THRESHOLD = 0.45   # sobre objectness * class (más estricto en la práctica)
-    NMS_THRESHOLD = 0.40
-    MIN_HEIGHT_RATIO = 0.05
-    MIN_WIDTH_RATIO = 0.015
-    MIN_AREA_RATIO = 0.002
-    MIN_ASPECT = 0.20
-    MAX_ASPECT = 0.90
-
     for detection in out:
         if len(detection) < 85:
             continue
         objectness = float(detection[4])
-        if objectness < 0.25:
+        if objectness < 0.10:
             continue
         class_scores = detection[5:]
         class_id = int(np.argmax(class_scores))
@@ -153,31 +159,22 @@ def detect_people(image_bytes):
         if class_id != PERSON_CLASS_ID or confidence < CONF_THRESHOLD:
             continue
 
-        cx = float(detection[0]) * w
-        cy = float(detection[1]) * h
-        bw = float(detection[2]) * w
-        bh = float(detection[3]) * h
+        # Coordenadas en espacio letterbox 640 -> imagen original
+        cx = (float(detection[0]) - pad_x) / ratio
+        cy = (float(detection[1]) - pad_y) / ratio
+        bw = float(detection[2]) / ratio
+        bh = float(detection[3]) / ratio
 
-        if bh <= 1 or bw <= 1:
-            continue
-        if bh < h * MIN_HEIGHT_RATIO:
-            continue
-        if bw < w * MIN_WIDTH_RATIO:
-            continue
-        if (bw * bh) < (w * h * MIN_AREA_RATIO):
-            continue
-        aspect = bw / bh
-        if aspect < MIN_ASPECT or aspect > MAX_ASPECT:
+        if bw < 8 or bh < 12:
             continue
 
         left = int(cx - bw / 2)
         top = int(cy - bh / 2)
-        # recortar al borde de la imagen
-        left = max(0, left)
-        top = max(0, top)
+        left = max(0, min(left, w - 1))
+        top = max(0, min(top, h - 1))
         bw = int(min(bw, w - left))
         bh = int(min(bh, h - top))
-        if bw < 8 or bh < 8:
+        if bw < 6 or bh < 10:
             continue
 
         boxes.append([left, top, bw, bh])
@@ -203,29 +200,28 @@ def detect_people(image_bytes):
     # Dibujar recuadros verdes en el servidor
     annotated = img.copy()
     thickness = max(2, int(min(w, h) / 220))
-    font_scale = max(0.45, min(w, h) / 850.0)
+    font_scale = max(0.5, min(w, h) / 900.0)
     for x, y, bw, bh, conf in final_boxes:
         cv2.rectangle(annotated, (x, y), (x + bw, y + bh), (0, 255, 0), thickness)
         label = f'{int(conf * 100)}%'
-        (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, max(1, thickness - 1))
-        ty = max(y, th + 6)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, max(1, thickness - 1))
+        ty = max(y, th + 8)
         cv2.rectangle(annotated, (x, ty - th - 6), (x + tw + 8, ty + 2), (0, 255, 0), -1)
         cv2.putText(annotated, label, (x + 4, ty - 4), cv2.FONT_HERSHEY_SIMPLEX,
                     font_scale, (0, 0, 0), max(1, thickness - 1), cv2.LINE_AA)
 
     count_label = f'Personas: {len(final_boxes)}'
-    cv2.rectangle(annotated, (8, 8), (240, 50), (0, 0, 0), -1)
-    cv2.putText(annotated, count_label, (16, 38), cv2.FONT_HERSHEY_SIMPLEX,
-                0.95, (0, 255, 0), 2, cv2.LINE_AA)
+    cv2.rectangle(annotated, (8, 8), (280, 55), (0, 0, 0), -1)
+    cv2.putText(annotated, count_label, (16, 42), cv2.FONT_HERSHEY_SIMPLEX,
+                1.0, (0, 255, 0), 2, cv2.LINE_AA)
 
-    # Reducir tamaño si es muy grande (límite de respuesta en Vercel)
     max_side = 1280
     ah, aw = annotated.shape[:2]
     if max(ah, aw) > max_side:
         scale = max_side / float(max(ah, aw))
         annotated = cv2.resize(annotated, (int(aw * scale), int(ah * scale)), interpolation=cv2.INTER_AREA)
 
-    ok, buf = cv2.imencode('.jpg', annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+    ok, buf = cv2.imencode('.jpg', annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     annotated_bytes = buf.tobytes() if ok else None
     return len(final_boxes), final_centers, final_boxes, annotated_bytes
 
