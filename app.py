@@ -104,51 +104,67 @@ def role_required(roles):
     return decorator
 
 def detect_people(image_bytes):
-    """Detecta solo personas humanas reales.
-    Filtros estrictos: alta confianza + tamaño mínimo + proporción de cuerpo humano.
-    Retorna (count, centers, boxes) donde boxes = [[x, y, w, h, conf], ...]
-    conf = confianza 0-1 para mostrar el % en el recuadro verde.
+    """Detecta personas humanas reales (YOLOv5 ONNX).
+    Confianza correcta = objectness * class_score.
+    Retorna (count, centers, boxes, annotated_jpeg_bytes)
+    boxes = [[x, y, w, h, conf], ...]
     """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
-        return 0, [], []
+        return 0, [], [], None
     (h, w) = img.shape[:2]
     blob = cv2.dnn.blobFromImage(img, 1/255.0, (640, 640), swapRB=True, crop=False)
     net = get_net()
     net.setInput(blob)
     outputs = net.forward()
 
+    # Soportar salida [1, N, 85] o [1, 85, N]
+    out = outputs[0]
+    if len(out.shape) == 2 and out.shape[0] == 85:
+        out = out.T  # -> [N, 85]
+    elif len(out.shape) == 2 and out.shape[1] != 85 and out.shape[0] != 85:
+        # intentar aplanar
+        out = out.reshape(-1, out.shape[-1])
+
     boxes = []
     confidences = []
     centers = []
 
-    CONF_THRESHOLD = 0.70
-    MIN_HEIGHT_RATIO = 0.06
-    MIN_WIDTH_RATIO = 0.02
+    CONF_THRESHOLD = 0.45   # sobre objectness * class (más estricto en la práctica)
+    NMS_THRESHOLD = 0.40
+    MIN_HEIGHT_RATIO = 0.05
+    MIN_WIDTH_RATIO = 0.015
     MIN_AREA_RATIO = 0.002
-    MIN_ASPECT = 0.25
-    MAX_ASPECT = 1.1
+    MIN_ASPECT = 0.20
+    MAX_ASPECT = 0.90
 
-    for detection in outputs[0]:
-        scores = detection[5:]
-        class_id = int(np.argmax(scores))
-        confidence = float(scores[class_id])
+    for detection in out:
+        if len(detection) < 85:
+            continue
+        objectness = float(detection[4])
+        if objectness < 0.25:
+            continue
+        class_scores = detection[5:]
+        class_id = int(np.argmax(class_scores))
+        class_conf = float(class_scores[class_id])
+        confidence = objectness * class_conf
+
         if class_id != PERSON_CLASS_ID or confidence < CONF_THRESHOLD:
             continue
 
-        cx = detection[0] * w
-        cy = detection[1] * h
-        bw = detection[2] * w
-        bh = detection[3] * h
+        cx = float(detection[0]) * w
+        cy = float(detection[1]) * h
+        bw = float(detection[2]) * w
+        bh = float(detection[3]) * h
 
-        if bh <= 0 or bw <= 0:
+        if bh <= 1 or bw <= 1:
             continue
         if bh < h * MIN_HEIGHT_RATIO:
             continue
         if bw < w * MIN_WIDTH_RATIO:
             continue
-        if bw * bh < (w * h * MIN_AREA_RATIO):
+        if (bw * bh) < (w * h * MIN_AREA_RATIO):
             continue
         aspect = bw / bh
         if aspect < MIN_ASPECT or aspect > MAX_ASPECT:
@@ -156,31 +172,66 @@ def detect_people(image_bytes):
 
         left = int(cx - bw / 2)
         top = int(cy - bh / 2)
-        boxes.append([left, top, int(bw), int(bh)])
-        confidences.append(confidence)
+        # recortar al borde de la imagen
+        left = max(0, left)
+        top = max(0, top)
+        bw = int(min(bw, w - left))
+        bh = int(min(bh, h - top))
+        if bw < 8 or bh < 8:
+            continue
+
+        boxes.append([left, top, bw, bh])
+        confidences.append(float(confidence))
         centers.append([int(cx), int(cy)])
 
     if not boxes:
-        return 0, [], []
+        return 0, [], [], None
 
-    indices = cv2.dnn.NMSBoxes(boxes, confidences, CONF_THRESHOLD, 0.4)
-    if len(indices) == 0:
-        return 0, [], []
+    indices = cv2.dnn.NMSBoxes(boxes, confidences, CONF_THRESHOLD, NMS_THRESHOLD)
+    if indices is None or len(indices) == 0:
+        return 0, [], [], None
 
     final_centers = []
     final_boxes = []
     for i in indices.flatten():
         i = int(i)
-        cx, cy = int(centers[i][0]), int(centers[i][1])
-        x, y, bw, bh = int(boxes[i][0]), int(boxes[i][1]), int(boxes[i][2]), int(boxes[i][3])
+        x, y, bw, bh = boxes[i]
         conf = float(round(confidences[i], 2))
-        final_centers.append([cx, cy])
-        # [x, y, w, h, confidence] — tipos nativos JSON
-        final_boxes.append([x, y, bw, bh, conf])
-    return len(final_centers), final_centers, final_boxes
+        final_centers.append([int(centers[i][0]), int(centers[i][1])])
+        final_boxes.append([int(x), int(y), int(bw), int(bh), conf])
+
+    # Dibujar recuadros verdes en el servidor
+    annotated = img.copy()
+    thickness = max(2, int(min(w, h) / 220))
+    font_scale = max(0.45, min(w, h) / 850.0)
+    for x, y, bw, bh, conf in final_boxes:
+        cv2.rectangle(annotated, (x, y), (x + bw, y + bh), (0, 255, 0), thickness)
+        label = f'{int(conf * 100)}%'
+        (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, max(1, thickness - 1))
+        ty = max(y, th + 6)
+        cv2.rectangle(annotated, (x, ty - th - 6), (x + tw + 8, ty + 2), (0, 255, 0), -1)
+        cv2.putText(annotated, label, (x + 4, ty - 4), cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale, (0, 0, 0), max(1, thickness - 1), cv2.LINE_AA)
+
+    count_label = f'Personas: {len(final_boxes)}'
+    cv2.rectangle(annotated, (8, 8), (240, 50), (0, 0, 0), -1)
+    cv2.putText(annotated, count_label, (16, 38), cv2.FONT_HERSHEY_SIMPLEX,
+                0.95, (0, 255, 0), 2, cv2.LINE_AA)
+
+    # Reducir tamaño si es muy grande (límite de respuesta en Vercel)
+    max_side = 1280
+    ah, aw = annotated.shape[:2]
+    if max(ah, aw) > max_side:
+        scale = max_side / float(max(ah, aw))
+        annotated = cv2.resize(annotated, (int(aw * scale), int(ah * scale)), interpolation=cv2.INTER_AREA)
+
+    ok, buf = cv2.imencode('.jpg', annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+    annotated_bytes = buf.tobytes() if ok else None
+    return len(final_boxes), final_centers, final_boxes, annotated_bytes
+
 
 def count_people(image_bytes):
-    count, _, _ = detect_people(image_bytes)
+    count, _, _, _ = detect_people(image_bytes)
     return count
 
 @app.route('/')
@@ -229,17 +280,18 @@ def count_image():
         return jsonify({'error': 'No image'}), 400
     file = request.files['image']
     image_bytes = file.read()
-    people_count, centers, boxes = detect_people(image_bytes)
+    people_count, centers, boxes, annotated_bytes = detect_people(image_bytes)
     
     save = request.form.get('save', 'true').lower() != 'false'
     photo_path = None
     if save:
+        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
         filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{session['user_id']}.jpg"
         photo_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        to_save = annotated_bytes if annotated_bytes else image_bytes
         with open(photo_path, 'wb') as f:
-            f.write(image_bytes)
+            f.write(to_save)
         
-        # Save to DB only if saving
         conn = get_db()
         conn.execute(
             'INSERT INTO counts (user_id, count, photo_path) VALUES (?, ?, ?)',
@@ -247,12 +299,18 @@ def count_image():
         )
         conn.commit()
         conn.close()
+
+    import base64
+    annotated_b64 = None
+    if annotated_bytes:
+        annotated_b64 = 'data:image/jpeg;base64,' + base64.b64encode(annotated_bytes).decode('ascii')
     
     return jsonify({
         'count': people_count,
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'centers': centers,
         'boxes': boxes,
+        'annotated_image': annotated_b64,
         'username': session.get('username', ''),
         'saved': save
     })
