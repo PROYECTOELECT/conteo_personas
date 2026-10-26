@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - Conteo de Personas{% endblock %}
+{% block content %}
+<div class="row">
+    <div class="col-md-8 offset-md-2">
+        <div class="card">
+            <div class="card-body text-center">
+                <h2>Bienvenido, {{ session.username }}</h2>
+                <p class="lead">Sistema de conteo de personas por cámara</p>
+                <div class="d-grid gap-3 col-md-6 mx-auto mt-4">
+                    <a href="{{ url_for('camera') }}" class="btn btn-success btn-lg">Tomar Foto / Conteo en Tiempo Real</a>
+                    <a href="{{ url_for('reports') }}" class="btn btn-info btn-lg">Ver Reportes</a>
+                    {% if session.role in ['master', 'admin'] %}
+                    <a href="{{ url_for('users') }}" class="btn btn-warning btn-lg">Gestionar Usuarios</a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Reportes - Conteo de Personas{% endblock %}
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h5>Reportes de Conteo</h5>
+    </div>
+    <div class="card-body">
+        <form id="filterForm" class="row g-3 mb-4">
+            <div class="col-md-4">
+                <label for="start_date" class="form-label">Fecha Inicio</label>
+                <input type="date" class="form-control" id="start_date" name="start_date">
+            </div>
+            <div class="col-md-4">
+                <label for="end_date" class="form-label">Fecha Final</label>
+                <input type="date" class="form-control" id="end_date" name="end_date">
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+                <button type="submit" class="btn btn-primary me-2">Filtrar</button>
+                <a id="excelBtn" href="#" class="btn btn-success me-2">Exportar Excel</a>
+                <a id="pdfBtn" href="#" class="btn btn-danger">Exportar PDF</a>
+            </div>
+        </form>
+        <div class="table-responsive">
+            <table class="table table-striped" id="reportsTable">
+                <thead>
+                    <tr>
+                        <th>Fecha y Hora</th>
+                        <th>Cantidad de Personas</th>
+                        <th>Usuario</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function loadReports() {
+    const start = document.getElementById('start_date').value;
+    const end = document.getElementById('end_date').value;
+    let url = '/api/reports?';
+    if (start) url += `start_date=${start}&`;
+    if (end) url += `end_date=${end}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const tbody = document.querySelector('#reportsTable tbody');
+    tbody.innerHTML = '';
+    data.forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${row.timestamp}</td><td>${row.count}</td><td>${row.username}</td>`;
+        tbody.appendChild(tr);
+    });
+    // Update export links
+    let excelUrl = '/export/excel?';
+    let pdfUrl = '/export/pdf?';
+    if (start) { excelUrl += `start_date=${start}&`; pdfUrl += `start_date=${start}&`; }
+    if (end) { excelUrl += `end_date=${end}`; pdfUrl += `end_date=${end}`; }
+    document.getElementById('excelBtn').href = excelUrl;
+    document.getElementById('pdfBtn').href = pdfUrl;
+}
+
+document.getElementById('filterForm').onsubmit = (e) => {
+    e.preventDefault();
+    loadReports();
+};
+
+loadReports();
+</script>
+{% endblock %}

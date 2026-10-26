@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Usuarios - Conteo de Personas{% endblock %}
+{% block content %}
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">Lista de Usuarios</div>
+            <div class="card-body">
+                <table class="table">
+                    <thead>
+                        <tr><th>ID</th><th>Usuario</th><th>Rol</th><th>Creado</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for user in users %}
+                        <tr>
+                            <td>{{ user.id }}</td>
+                            <td>{{ user.username }}</td>
+                            <td>{{ user.role }}</td>
+                            <td>{{ user.created_at }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">Crear Usuario</div>
+            <div class="card-body">
+                <form method="POST" action="{{ url_for('create_user') }}">
+                    <div class="mb-3">
+                        <label class="form-label">Usuario</label>
+                        <input type="text" name="username" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Contraseña</label>
+                        <input type="password" name="password" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Rol</label>
+                        <select name="role" class="form-select" required>
+                            {% if session.role == 'master' %}
+                            <option value="admin">Administrador</option>
+                            <option value="user">Usuario General</option>
+                            {% else %}
+                            <option value="user">Usuario General</option>
+                            {% endif %}
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Crear</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

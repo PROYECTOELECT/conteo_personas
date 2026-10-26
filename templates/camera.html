@@ -1,0 +1,458 @@
+{% extends "base.html" %}
+{% block title %}Cámara - Conteo de Personas{% endblock %}
+{% block content %}
+<div class="row">
+    <div class="col-lg-8">
+        <div class="card mb-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Cámara en vivo</h5>
+                <span id="statusBadge" class="badge bg-secondary">Detenido</span>
+            </div>
+            <div class="card-body text-center position-relative">
+                <div style="position: relative; display: inline-block; width: 100%; max-width: 100%;">
+                    <video id="video" autoplay playsinline style="width:100%; max-height:420px; background:#000; border-radius:8px; display:block;"></video>
+                    <canvas id="overlay" style="position:absolute; top:0; left:0; pointer-events:none; border-radius:8px;"></canvas>
+                </div>
+                <canvas id="captureCanvas" style="display:none;"></canvas>
+                <div class="mt-3">
+                    <button id="startBtn" class="btn btn-primary">Iniciar Cámara</button>
+                    <button id="captureBtn" class="btn btn-success" disabled>Capturar y Contar</button>
+                    <button id="realtimeBtn" class="btn btn-warning" disabled>Iniciar Tiempo Real</button>
+                    <button id="stopRealtimeBtn" class="btn btn-danger" disabled>Detener Tiempo Real</button>
+                    <button id="saveCurrentBtn" class="btn btn-outline-success" disabled>Guardar registro actual</button>
+                </div>
+                <div id="result" class="mt-3 alert alert-success" style="display:none;">
+                    <strong>Completado</strong><br>
+                    Personas detectadas: <span id="countResult" class="fs-4 fw-bold"></span><br>
+                    <small id="timeResult"></small><br>
+                    <button id="exportBtn" class="btn btn-outline-primary btn-sm mt-2" style="display:none;">Exportar imagen con datos</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Subir imagen y contar</h5>
+            </div>
+            <div class="card-body">
+                <form id="uploadForm">
+                    <div class="mb-3">
+                        <input type="file" id="imageUpload" accept="image/*" class="form-control" required>
+                    </div>
+                    <button type="submit" class="btn btn-info">Contar en imagen subida</button>
+                </form>
+                <div id="uploadResult" class="mt-3" style="display:none;">
+                    <div style="position: relative; display: inline-block; max-width: 100%;">
+                        <img id="uploadedImg" style="max-width:100%; max-height:400px; border-radius:8px; display:block;">
+                        <canvas id="uploadOverlay" style="position:absolute; top:0; left:0; pointer-events:none; border-radius:8px;"></canvas>
+                    </div>
+                    <div class="mt-2 alert alert-success">
+                        <strong>Completado</strong> — Personas: <span id="uploadCount" class="fw-bold"></span><br>
+                        <small id="uploadTime"></small><br>
+                        <button id="exportUploadBtn" class="btn btn-outline-primary btn-sm mt-2">Exportar imagen con datos</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header">Instrucciones</div>
+            <div class="card-body">
+                <ul class="small">
+                    <li>Inicia la cámara y permite el acceso.</li>
+                    <li>Los puntos verdes aparecen sobre cada persona detectada y se actualizan en tiempo real.</li>
+                    <li>Puedes capturar una foto o usar modo tiempo real (cada 3 s).</li>
+                    <li>También puedes subir una imagen desde tu dispositivo.</li>
+                    <li>Al finalizar el conteo aparece <strong>Completado</strong> y la opción de exportar la imagen anotada con datos técnicos.</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const overlayCtx = overlay.getContext('2d');
+const captureCanvas = document.getElementById('captureCanvas');
+const startBtn = document.getElementById('startBtn');
+const captureBtn = document.getElementById('captureBtn');
+const realtimeBtn = document.getElementById('realtimeBtn');
+const stopRealtimeBtn = document.getElementById('stopRealtimeBtn');
+const resultDiv = document.getElementById('result');
+const countResult = document.getElementById('countResult');
+const timeResult = document.getElementById('timeResult');
+const saveCurrentBtn = document.getElementById('saveCurrentBtn');
+
+// ... existing variables ...
+
+let stream = null;
+let realtimeInterval = null;
+let lastCenters = [];
+let lastBoxes = [];
+let lastTimestamp = '';
+let lastCount = 0;
+let lastUsername = '';
+let currentLocation = {
+    lat: null,
+    lng: null,
+    altitude: null,
+    address: '',
+    city: '',
+    neighborhood: '',
+    country: '',
+    continent: '',
+    accuracy: null
+};
+
+async function getLocation() {
+    return new Promise((resolve) => {
+        if (!navigator.geolocation) {
+            resolve(null);
+            return;
+        }
+        navigator.geolocation.getCurrentPosition(
+            async (pos) => {
+                const { latitude, longitude, altitude, accuracy } = pos.coords;
+                currentLocation.lat = latitude;
+                currentLocation.lng = longitude;
+                currentLocation.altitude = altitude;
+                currentLocation.accuracy = accuracy;
+
+                try {
+                    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&addressdetails=1&accept-language=es`;
+                    const res = await fetch(url, {
+                        headers: { 'User-Agent': 'ConteoPersonasApp/1.0' }
+                    });
+                    const data = await res.json();
+                    const addr = data.address || {};
+                    currentLocation.address = data.display_name || '';
+                    currentLocation.city = addr.city || addr.town || addr.village || addr.municipality || '';
+                    currentLocation.neighborhood = addr.neighbourhood || addr.suburb || addr.quarter || addr.residential || '';
+                    currentLocation.country = addr.country || '';
+                    const continents = {
+                        'CO': 'América', 'US': 'América', 'MX': 'América', 'BR': 'América', 'AR': 'América',
+                        'ES': 'Europa', 'FR': 'Europa', 'DE': 'Europa', 'IT': 'Europa', 'GB': 'Europa',
+                        'CN': 'Asia', 'JP': 'Asia', 'IN': 'Asia', 'KR': 'Asia',
+                        'ZA': 'África', 'NG': 'África', 'EG': 'África',
+                        'AU': 'Oceanía', 'NZ': 'Oceanía'
+                    };
+                    currentLocation.continent = continents[(addr.country_code || '').toUpperCase()] || 'Desconocido';
+                } catch (e) {
+                    console.warn('Error reverse geocoding:', e);
+                }
+                resolve(currentLocation);
+            },
+            (err) => {
+                console.warn('Geolocalización no disponible:', err.message);
+                resolve(null);
+            },
+            { enableHighAccuracy: true, timeout: 12000, maximumAge: 20000 }
+        );
+    });
+}
+
+function getLocationText() {
+    if (!currentLocation.lat) return 'Ubicación GPS no disponible';
+    let lines = [];
+    lines.push(`GPS: ${currentLocation.lat.toFixed(6)}, ${currentLocation.lng.toFixed(6)}`);
+    if (currentLocation.altitude != null) lines.push(`Altura: ${Math.round(currentLocation.altitude)} m`);
+    if (currentLocation.neighborhood) lines.push(`Barrio: ${currentLocation.neighborhood}`);
+    if (currentLocation.city) lines.push(`Ciudad: ${currentLocation.city}`);
+    if (currentLocation.country) lines.push(`País: ${currentLocation.country}`);
+    if (currentLocation.continent && currentLocation.continent !== 'Desconocido') lines.push(`Continente: ${currentLocation.continent}`);
+    if (currentLocation.address) lines.push(`Dirección: ${currentLocation.address}`);
+    return lines.join('\n');
+}
+
+function resizeOverlay() {
+    overlay.width = video.videoWidth || video.clientWidth;
+    overlay.height = video.videoHeight || video.clientHeight;
+}
+
+function drawBoxes(boxes, srcW, srcH) {
+    const rect = video.getBoundingClientRect();
+    overlay.width = rect.width;
+    overlay.height = rect.height;
+    overlay.style.width = rect.width + 'px';
+    overlay.style.height = rect.height + 'px';
+
+    overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+    if (!boxes || boxes.length === 0) return;
+
+    const scaleX = overlay.width / srcW;
+    const scaleY = overlay.height / srcH;
+
+    overlayCtx.strokeStyle = '#00ff00';
+    overlayCtx.lineWidth = 3;
+    overlayCtx.font = 'bold 14px Arial';
+    overlayCtx.fillStyle = '#00ff00';
+
+    boxes.forEach(([x, y, w, h], idx) => {
+        const sx = x * scaleX;
+        const sy = y * scaleY;
+        const sw = w * scaleX;
+        const sh = h * scaleY;
+        overlayCtx.strokeRect(sx, sy, sw, sh);
+        // Número opcional sobre el recuadro
+        overlayCtx.fillText(String(idx + 1), sx + 4, sy - 4);
+    });
+
+    // Contador en vivo
+    overlayCtx.fillStyle = 'rgba(0,0,0,0.75)';
+    overlayCtx.fillRect(10, 10, 170, 38);
+    overlayCtx.fillStyle = '#00ff00';
+    overlayCtx.font = 'bold 18px Arial';
+    overlayCtx.fillText(`Personas: ${boxes.length}`, 18, 35);
+}
+
+async function processFrame(drawOnVideo = true, doSave = false) {
+    if (!video.videoWidth) return;
+    captureCanvas.width = video.videoWidth;
+    captureCanvas.height = video.videoHeight;
+    captureCanvas.getContext('2d').drawImage(video, 0, 0);
+    return new Promise((resolve) => {
+        captureCanvas.toBlob(async (blob) => {
+            const formData = new FormData();
+            formData.append('image', blob, 'frame.jpg');
+            formData.append('save', doSave ? 'true' : 'false');
+            try {
+                const res = await fetch('/count', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.count !== undefined) {
+                    lastCount = data.count;
+                    lastCenters = data.centers || [];
+                    lastBoxes = data.boxes || [];
+                    lastTimestamp = data.timestamp;
+                    lastUsername = data.username || '';
+                    // Actualizar ubicación justo antes de mostrar
+                    await getLocation();
+                    countResult.textContent = data.count;
+                    timeResult.innerHTML = data.timestamp + (doSave ? ' (guardado)' : '') + 
+                        '<br><small style="white-space:pre-line;">' + getLocationText() + '</small>';
+                    resultDiv.style.display = 'block';
+                    exportBtn.style.display = 'inline-block';
+                    statusBadge.textContent = 'Completado';
+                    statusBadge.className = 'badge bg-success';
+                    if (drawOnVideo) {
+                        drawBoxes(lastBoxes, video.videoWidth, video.videoHeight);
+                    }
+                }
+                resolve(data);
+            } catch (e) {
+                console.error(e);
+                resolve(null);
+            }
+        }, 'image/jpeg', 0.85);
+    });
+}
+
+startBtn.onclick = async () => {
+    try {
+        // Pedir ubicación al iniciar cámara
+        await getLocation();
+        stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, 
+            audio: false 
+        });
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+            resizeOverlay();
+            startBtn.disabled = true;
+            captureBtn.disabled = false;
+            realtimeBtn.disabled = false;
+            saveCurrentBtn.disabled = false;
+            statusBadge.textContent = 'Cámara activa';
+            statusBadge.className = 'badge bg-primary';
+        };
+    } catch (err) {
+        alert('Error al acceder a la cámara: ' + err.message);
+    }
+};
+
+captureBtn.onclick = () => processFrame(true, true);
+
+realtimeBtn.onclick = () => {
+    realtimeBtn.disabled = true;
+    stopRealtimeBtn.disabled = false;
+    statusBadge.textContent = 'Tiempo real';
+    statusBadge.className = 'badge bg-warning text-dark';
+    realtimeInterval = setInterval(() => processFrame(true, false), 2500);
+};
+
+stopRealtimeBtn.onclick = () => {
+    clearInterval(realtimeInterval);
+    realtimeBtn.disabled = false;
+    stopRealtimeBtn.disabled = true;
+    statusBadge.textContent = 'Detenido';
+    statusBadge.className = 'badge bg-secondary';
+    overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+};
+
+function createAnnotatedImage(imgSrc, boxes, count, timestamp, username) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+
+            // Draw green bounding boxes
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = Math.max(2, img.width / 300);
+            ctx.font = 'bold 16px Arial';
+            ctx.fillStyle = '#00ff00';
+
+            (boxes || []).forEach(([x, y, w, h], idx) => {
+                ctx.strokeRect(x, y, w, h);
+                ctx.fillText(String(idx + 1), x + 5, y - 5);
+            });
+
+            // Technical data + location overlay
+            const locText = getLocationText();
+            const padding = 14;
+            const lineHeight = 22;
+            const lines = [
+                `CONTEO DE PERSONAS - COMPLETADO`,
+                `Cantidad: ${count} personas`,
+                `Fecha y hora: ${timestamp}`,
+                `Usuario: ${username}`,
+                ...locText.split('\n'),
+                `Recuadros verdes = personas detectadas`
+            ];
+
+            ctx.font = 'bold 15px Arial';
+            const textWidth = Math.max(...lines.map(l => ctx.measureText(l).width)) + 28;
+            const boxHeight = lines.length * lineHeight + padding * 2;
+            const boxY = canvas.height - boxHeight - 12;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.78)';
+            ctx.fillRect(12, boxY, textWidth, boxHeight);
+            ctx.fillStyle = '#ffffff';
+            lines.forEach((line, i) => {
+                ctx.fillText(line, 22, boxY + padding + (i + 1) * lineHeight - 4);
+            });
+
+            resolve(canvas.toDataURL('image/jpeg', 0.92));
+        };
+        img.src = imgSrc;
+    });
+}
+
+exportBtn.onclick = async () => {
+    if (!lastBoxes.length && lastCount === 0) return;
+    const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.9);
+    const annotated = await createAnnotatedImage(dataUrl, lastBoxes, lastCount, lastTimestamp, lastUsername);
+    const a = document.createElement('a');
+    a.href = annotated;
+    a.download = `conteo_${lastTimestamp.replace(/[: ]/g, '_')}.jpg`;
+    a.click();
+};
+
+saveCurrentBtn.onclick = () => {
+    if (!video.videoWidth) return;
+    processFrame(true, true);
+};
+
+// Upload image
+const uploadForm = document.getElementById('uploadForm');
+const uploadResult = document.getElementById('uploadResult');
+const uploadedImg = document.getElementById('uploadedImg');
+const uploadOverlay = document.getElementById('uploadOverlay');
+const uploadCount = document.getElementById('uploadCount');
+const uploadTime = document.getElementById('uploadTime');
+const exportUploadBtn = document.getElementById('exportUploadBtn');
+let uploadBoxes = [];
+let uploadTimestamp = '';
+let uploadCountVal = 0;
+let uploadUsername = '';
+
+uploadForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const file = document.getElementById('imageUpload').files[0];
+    if (!file) return;
+    // Intentar obtener ubicación también para imágenes subidas
+    await getLocation();
+    const formData = new FormData();
+    formData.append('image', file);
+    try {
+        const res = await fetch('/count', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.count !== undefined) {
+            uploadCountVal = data.count;
+            uploadBoxes = data.boxes || [];
+            uploadTimestamp = data.timestamp;
+            uploadUsername = data.username || '';
+            uploadCount.textContent = data.count;
+            uploadTime.innerHTML = data.timestamp + '<br><small style="white-space:pre-line;">' + getLocationText() + '</small>';
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                uploadedImg.src = ev.target.result;
+                uploadedImg.onload = () => {
+                    // Esperar un frame para que el layout calcule el tamaño real
+                    requestAnimationFrame(() => {
+                        const rect = uploadedImg.getBoundingClientRect();
+                        uploadOverlay.width = rect.width;
+                        uploadOverlay.height = rect.height;
+                        uploadOverlay.style.width = rect.width + 'px';
+                        uploadOverlay.style.height = rect.height + 'px';
+                        uploadOverlay.style.position = 'absolute';
+                        uploadOverlay.style.top = '0';
+                        uploadOverlay.style.left = '0';
+
+                        const ctx = uploadOverlay.getContext('2d');
+                        ctx.clearRect(0, 0, uploadOverlay.width, uploadOverlay.height);
+
+                        const scaleX = uploadOverlay.width / uploadedImg.naturalWidth;
+                        const scaleY = uploadOverlay.height / uploadedImg.naturalHeight;
+
+                        ctx.strokeStyle = '#00ff00';
+                        ctx.lineWidth = 3;
+                        ctx.font = 'bold 14px Arial';
+                        ctx.fillStyle = '#00ff00';
+
+                        uploadBoxes.forEach(([x, y, w, h], idx) => {
+                            const sx = x * scaleX;
+                            const sy = y * scaleY;
+                            const sw = w * scaleX;
+                            const sh = h * scaleY;
+                            ctx.strokeRect(sx, sy, sw, sh);
+                            ctx.fillText(String(idx + 1), sx + 4, sy - 4);
+                        });
+
+                        // Contador sobre la imagen
+                        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+                        ctx.fillRect(8, 8, 160, 36);
+                        ctx.fillStyle = '#00ff00';
+                        ctx.font = 'bold 16px Arial';
+                        ctx.fillText(`Personas: ${uploadBoxes.length}`, 14, 32);
+
+                        uploadResult.style.display = 'block';
+                    });
+                };
+            };
+            reader.readAsDataURL(file);
+        }
+    } catch (err) {
+        alert('Error al procesar la imagen');
+    }
+};
+
+exportUploadBtn.onclick = async () => {
+    if (!uploadedImg.src) return;
+    const annotated = await createAnnotatedImage(uploadedImg.src, uploadBoxes, uploadCountVal, uploadTimestamp, uploadUsername);
+    const a = document.createElement('a');
+    a.href = annotated;
+    a.download = `conteo_subida_${uploadTimestamp.replace(/[: ]/g, '_')}.jpg`;
+    a.click();
+};
+
+window.addEventListener('beforeunload', () => {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+});
+</script>
+{% endblock %}
