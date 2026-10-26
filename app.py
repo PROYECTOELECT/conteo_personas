@@ -170,9 +170,13 @@ def detect_people(image_bytes):
     final_centers = []
     final_boxes = []
     for i in indices.flatten():
-        final_centers.append(centers[i])
-        # [x, y, w, h, confidence]
-        final_boxes.append(boxes[i] + [round(confidences[i], 2)])
+        i = int(i)
+        cx, cy = int(centers[i][0]), int(centers[i][1])
+        x, y, bw, bh = int(boxes[i][0]), int(boxes[i][1]), int(boxes[i][2]), int(boxes[i][3])
+        conf = float(round(confidences[i], 2))
+        final_centers.append([cx, cy])
+        # [x, y, w, h, confidence] — tipos nativos JSON
+        final_boxes.append([x, y, bw, bh, conf])
     return len(final_centers), final_centers, final_boxes
 
 def count_people(image_bytes):
