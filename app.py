@@ -16,53 +16,72 @@ from reportlab.lib import colors
 from functools import wraps
 
 app = Flask(__name__)
-app.secret_key = 'clave_secreta_local_2026_conteo_personas'
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['DATABASE'] = 'people_count.db'
+app.secret_key = os.environ.get('SECRET_KEY', 'clave_secreta_local_2026_conteo_personas')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 
-# Load YOLO model (YOLOv5n ONNX)
-model_path = 'models/yolov5n.onnx'
-net = cv2.dnn.readNetFromONNX(model_path)
-PERSON_CLASS_ID = 0  # person in COCO dataset
+# En Vercel el sistema de archivos es de solo lectura excepto /tmp
+IS_VERCEL = bool(os.environ.get('VERCEL') or os.environ.get('VERCEL_ENV'))
+BASE_DIR = '/tmp' if IS_VERCEL else os.path.dirname(os.path.abspath(__file__))
+app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
+app.config['DATABASE'] = os.path.join(BASE_DIR, 'people_count.db')
+
+# Ruta del modelo (siempre relativa al proyecto)
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'yolov5n.onnx')
+PERSON_CLASS_ID = 0
+
+# Carga perezosa del modelo (evita fallos al arrancar en Vercel)
+_net = None
+
+def get_net():
+    global _net
+    if _net is None:
+        if not os.path.exists(MODEL_PATH):
+            raise FileNotFoundError(f'Modelo no encontrado: {MODEL_PATH}')
+        _net = cv2.dnn.readNetFromONNX(MODEL_PATH)
+    return _net
 
 def get_db():
+    os.makedirs(os.path.dirname(app.config['DATABASE']) or '.', exist_ok=True)
     conn = sqlite3.connect(app.config['DATABASE'])
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
-    conn = get_db()
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('master', 'admin', 'user')),
-            created_by INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS counts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            count INTEGER NOT NULL,
-            photo_path TEXT,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    ''')
-    # Create master user if not exists
-    master = conn.execute("SELECT id FROM users WHERE role='master'").fetchone()
-    if not master:
-        conn.execute(
-            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-            ('master', generate_password_hash('master123'), 'master')
-        )
-    conn.commit()
-    conn.close()
+    try:
+        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+        conn = get_db()
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('master', 'admin', 'user')),
+                created_by INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS counts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                count INTEGER NOT NULL,
+                photo_path TEXT,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
+        master = conn.execute("SELECT id FROM users WHERE role='master'").fetchone()
+        if not master:
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+                ('master', generate_password_hash('master123'), 'master')
+            )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f'init_db warning: {e}')
 
+# Inicializar DB de forma segura
 init_db()
 
 def login_required(f):
@@ -94,6 +113,7 @@ def detect_people(image_bytes):
         return 0, [], []
     (h, w) = img.shape[:2]
     blob = cv2.dnn.blobFromImage(img, 1/255.0, (640, 640), swapRB=True, crop=False)
+    net = get_net()
     net.setInput(blob)
     outputs = net.forward()
 
