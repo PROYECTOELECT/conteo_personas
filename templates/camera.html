@@ -435,13 +435,14 @@ uploadForm.onsubmit = async (e) => {
             uploadCount.textContent = data.count;
             uploadTime.innerHTML = data.timestamp + '<br><small style="white-space:pre-line;">' + getLocationText() + '</small>';
             // Preferir imagen anotada del servidor (recuadros verdes ya dibujados)
+            console.log('count=', data.count, 'boxes=', (data.boxes||[]).length, 'hasAnnotated=', !!data.annotated_image);
             if (data.annotated_image) {
                 uploadedImg.src = data.annotated_image;
-                uploadOverlay.width = 1;
-                uploadOverlay.height = 1;
+                uploadedImg.style.maxWidth = '100%';
                 uploadOverlay.style.display = 'none';
                 uploadResult.style.display = 'block';
             } else {
+                console.warn('Sin imagen anotada del servidor, dibujo en cliente');
                 uploadOverlay.style.display = 'block';
                 const reader = new FileReader();
                 reader.onload = (ev) => {
