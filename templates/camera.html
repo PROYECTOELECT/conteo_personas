@@ -258,7 +258,7 @@ async function processFrame(drawOnVideo = true, doSave = false) {
                     lastBoxes = data.boxes || [];
                     lastTimestamp = data.timestamp;
                     lastUsername = data.username || '';
-                    // Actualizar ubicación justo antes de mostrar
+                    window.lastAnnotatedImage = data.annotated_image || null;
                     await getLocation();
                     countResult.textContent = data.count;
                     timeResult.innerHTML = data.timestamp + (doSave ? ' (guardado)' : '') + 
@@ -268,8 +268,6 @@ async function processFrame(drawOnVideo = true, doSave = false) {
                     statusBadge.textContent = 'Completado';
                     statusBadge.className = 'badge bg-success';
                     if (drawOnVideo) {
-                        console.log('boxes recibidos:', lastBoxes);
-                        // Esperar un frame para que el layout del video esté listo
                         requestAnimationFrame(() => {
                             drawBoxes(lastBoxes, video.videoWidth || captureCanvas.width, video.videoHeight || captureCanvas.height);
                         });
@@ -389,10 +387,13 @@ function createAnnotatedImage(imgSrc, boxes, count, timestamp, username) {
 
 exportBtn.onclick = async () => {
     if (!lastBoxes.length && lastCount === 0) return;
-    const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.9);
-    const annotated = await createAnnotatedImage(dataUrl, lastBoxes, lastCount, lastTimestamp, lastUsername);
+    let href = window.lastAnnotatedImage;
+    if (!href) {
+        const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.9);
+        href = await createAnnotatedImage(dataUrl, lastBoxes, lastCount, lastTimestamp, lastUsername);
+    }
     const a = document.createElement('a');
-    a.href = annotated;
+    a.href = href;
     a.download = `conteo_${lastTimestamp.replace(/[: ]/g, '_')}.jpg`;
     a.click();
 };
@@ -433,64 +434,44 @@ uploadForm.onsubmit = async (e) => {
             uploadUsername = data.username || '';
             uploadCount.textContent = data.count;
             uploadTime.innerHTML = data.timestamp + '<br><small style="white-space:pre-line;">' + getLocationText() + '</small>';
-            const reader = new FileReader();
-            reader.onload = (ev) => {
-                uploadedImg.src = ev.target.result;
-                uploadedImg.onload = () => {
-                    // Esperar un frame para que el layout calcule el tamaño real
-                    requestAnimationFrame(() => {
-                        const rect = uploadedImg.getBoundingClientRect();
-                        uploadOverlay.width = rect.width;
-                        uploadOverlay.height = rect.height;
-                        uploadOverlay.style.width = rect.width + 'px';
-                        uploadOverlay.style.height = rect.height + 'px';
-                        uploadOverlay.style.position = 'absolute';
-                        uploadOverlay.style.top = '0';
-                        uploadOverlay.style.left = '0';
-
-                        const ctx = uploadOverlay.getContext('2d');
-                        ctx.clearRect(0, 0, uploadOverlay.width, uploadOverlay.height);
-
-                        const scaleX = uploadOverlay.width / uploadedImg.naturalWidth;
-                        const scaleY = uploadOverlay.height / uploadedImg.naturalHeight;
-
-                        console.log('upload boxes:', uploadBoxes);
-                        uploadBoxes.forEach((box) => {
-                            const x = Number(box[0]), y = Number(box[1]), w = Number(box[2]), h = Number(box[3]);
-                            const conf = box[4] != null ? Number(box[4]) : null;
-                            const sx = x * scaleX;
-                            const sy = y * scaleY;
-                            const sw = Math.max(w * scaleX, 4);
-                            const sh = Math.max(h * scaleY, 4);
-                            ctx.strokeStyle = '#00FF00';
-                            ctx.lineWidth = Math.max(3, Math.round(uploadOverlay.width / 200));
-                            ctx.strokeRect(sx, sy, sw, sh);
-                            ctx.fillStyle = 'rgba(0, 255, 0, 0.12)';
-                            ctx.fillRect(sx, sy, sw, sh);
-                            const label = conf != null ? Math.round(conf * 100) + '%' : '';
-                            if (label) {
-                                ctx.font = 'bold 13px Arial';
-                                const tw = ctx.measureText(label).width + 8;
-                                const ty = Math.max(sy - 2, 16);
-                                ctx.fillStyle = '#00FF00';
-                                ctx.fillRect(sx, ty - 14, tw, 16);
-                                ctx.fillStyle = '#000000';
-                                ctx.fillText(label, sx + 4, ty - 2);
-                            }
+            // Preferir imagen anotada del servidor (recuadros verdes ya dibujados)
+            if (data.annotated_image) {
+                uploadedImg.src = data.annotated_image;
+                uploadOverlay.width = 1;
+                uploadOverlay.height = 1;
+                uploadOverlay.style.display = 'none';
+                uploadResult.style.display = 'block';
+            } else {
+                uploadOverlay.style.display = 'block';
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    uploadedImg.src = ev.target.result;
+                    uploadedImg.onload = () => {
+                        requestAnimationFrame(() => {
+                            const rect = uploadedImg.getBoundingClientRect();
+                            uploadOverlay.width = rect.width;
+                            uploadOverlay.height = rect.height;
+                            uploadOverlay.style.width = rect.width + 'px';
+                            uploadOverlay.style.height = rect.height + 'px';
+                            const ctx = uploadOverlay.getContext('2d');
+                            ctx.clearRect(0, 0, uploadOverlay.width, uploadOverlay.height);
+                            const scaleX = uploadOverlay.width / uploadedImg.naturalWidth;
+                            const scaleY = uploadOverlay.height / uploadedImg.naturalHeight;
+                            uploadBoxes.forEach((box) => {
+                                const x = Number(box[0]), y = Number(box[1]), w = Number(box[2]), h = Number(box[3]);
+                                const conf = box[4] != null ? Number(box[4]) : null;
+                                const sx = x * scaleX, sy = y * scaleY;
+                                const sw = Math.max(w * scaleX, 4), sh = Math.max(h * scaleY, 4);
+                                ctx.strokeStyle = '#00FF00';
+                                ctx.lineWidth = 3;
+                                ctx.strokeRect(sx, sy, sw, sh);
+                            });
+                            uploadResult.style.display = 'block';
                         });
-
-                        // Contador sobre la imagen
-                        ctx.fillStyle = 'rgba(0,0,0,0.7)';
-                        ctx.fillRect(8, 8, 160, 36);
-                        ctx.fillStyle = '#00ff00';
-                        ctx.font = 'bold 16px Arial';
-                        ctx.fillText(`Personas: ${uploadBoxes.length}`, 14, 32);
-
-                        uploadResult.style.display = 'block';
-                    });
+                    };
                 };
-            };
-            reader.readAsDataURL(file);
+                reader.readAsDataURL(file);
+            }
         }
     } catch (err) {
         alert('Error al procesar la imagen');
@@ -499,9 +480,9 @@ uploadForm.onsubmit = async (e) => {
 
 exportUploadBtn.onclick = async () => {
     if (!uploadedImg.src) return;
-    const annotated = await createAnnotatedImage(uploadedImg.src, uploadBoxes, uploadCountVal, uploadTimestamp, uploadUsername);
+    // La imagen subida ya puede venir anotada del servidor
     const a = document.createElement('a');
-    a.href = annotated;
+    a.href = uploadedImg.src;
     a.download = `conteo_subida_${uploadTimestamp.replace(/[: ]/g, '_')}.jpg`;
     a.click();
 };
