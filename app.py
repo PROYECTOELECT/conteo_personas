@@ -104,8 +104,10 @@ def role_required(roles):
     return decorator
 
 def detect_people(image_bytes):
-    """Detecta solo personas humanas reales con filtros estrictos.
-    Retorna (count, centers, boxes) donde boxes = [[x, y, w, h], ...]
+    """Detecta solo personas humanas reales.
+    Filtros estrictos: alta confianza + tamaño mínimo + proporción de cuerpo humano.
+    Retorna (count, centers, boxes) donde boxes = [[x, y, w, h, conf], ...]
+    conf = confianza 0-1 para mostrar el % en el recuadro verde.
     """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -121,10 +123,12 @@ def detect_people(image_bytes):
     confidences = []
     centers = []
 
-    CONF_THRESHOLD = 0.65
-    MIN_AREA_RATIO = 0.0012
+    CONF_THRESHOLD = 0.70
+    MIN_HEIGHT_RATIO = 0.06
+    MIN_WIDTH_RATIO = 0.02
+    MIN_AREA_RATIO = 0.002
     MIN_ASPECT = 0.25
-    MAX_ASPECT = 1.8
+    MAX_ASPECT = 1.1
 
     for detection in outputs[0]:
         scores = detection[5:]
@@ -137,9 +141,14 @@ def detect_people(image_bytes):
         cy = detection[1] * h
         bw = detection[2] * w
         bh = detection[3] * h
-        if bw * bh < (w * h * MIN_AREA_RATIO):
+
+        if bh <= 0 or bw <= 0:
             continue
-        if bh <= 0:
+        if bh < h * MIN_HEIGHT_RATIO:
+            continue
+        if bw < w * MIN_WIDTH_RATIO:
+            continue
+        if bw * bh < (w * h * MIN_AREA_RATIO):
             continue
         aspect = bw / bh
         if aspect < MIN_ASPECT or aspect > MAX_ASPECT:
@@ -158,12 +167,16 @@ def detect_people(image_bytes):
     if len(indices) == 0:
         return 0, [], []
 
-    final_centers = [centers[i] for i in indices.flatten()]
-    final_boxes = [boxes[i] for i in indices.flatten()]
+    final_centers = []
+    final_boxes = []
+    for i in indices.flatten():
+        final_centers.append(centers[i])
+        # [x, y, w, h, confidence]
+        final_boxes.append(boxes[i] + [round(confidences[i], 2)])
     return len(final_centers), final_centers, final_boxes
 
 def count_people(image_bytes):
-    count, _ = detect_people(image_bytes)
+    count, _, _ = detect_people(image_bytes)
     return count
 
 @app.route('/')
